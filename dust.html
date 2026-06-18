@@ -103,6 +103,30 @@ function resolveCircleRect(cx, cy, r, rect) {
   return [cx, cy];
 }
 
+function pointInRects(x, y, rects) {
+  for (const r of rects) if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return true;
+  return false;
+}
+
+// Shortest distance from a point to a line segment a→b.
+function pointSegDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const l2 = dx * dx + dy * dy;
+  let t = l2 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+  t = Math.max(0, Math.min(1, t));
+  const cx = ax + dx * t, cy = ay + dy * t;
+  return Math.hypot(px - cx, py - cy);
+}
+
+// How far the hose can extend from a hoover before a wall/furniture blocks it.
+function hoseReach(hx, hy, dirx, diry, maxLen) {
+  const rects = level.walls.concat(level.furniture);
+  for (let s = level.hooverR + 4; s <= maxLen; s += 6) {
+    if (pointInRects(hx + dirx * s, hy + diry * s, rects)) return Math.max(level.hooverR, s - 6);
+  }
+  return maxLen;
+}
+
 // ---------- level generation ----------
 function buildWalls(doorSide, doorPos) {
   // Each wall is split around the door gap on its side.
@@ -216,14 +240,28 @@ function genLevel(n) {
     else if (side === 2) { player.x = W - WALL - 50; player.y = H / 2 + (rand() - 0.5) * 200; }
     else                 { player.x = WALL + 50;     player.y = H / 2 + (rand() - 0.5) * 200; }
 
-    // hoover starts near the centre, pushed away from the player
-    let hx = W / 2 + (rand() - 0.5) * 160;
-    let hy = H / 2 + (rand() - 0.5) * 120;
-    const pdx = hx - player.x, pdy = hy - player.y;
-    const pd = Math.hypot(pdx, pdy) || 1;
-    if (pd < 220) { hx = player.x + pdx / pd * 220; hy = player.y + pdy / pd * 220; }
-    hx = Math.max(WALL + 40, Math.min(W - WALL - 40, hx));
-    hy = Math.max(WALL + 40, Math.min(H - WALL - 40, hy));
+    // hoovers start near the centre, pushed away from the player (and each other).
+    // A second hoover joins from level 5 onwards.
+    const numHoovers = n >= 5 ? 2 : 1;
+    const hooverStarts = [];
+    for (let h = 0; h < numHoovers; h++) {
+      let hx = W / 2 + (rand() - 0.5) * 220;
+      let hy = H / 2 + (rand() - 0.5) * 180;
+      const pdx = hx - player.x, pdy = hy - player.y;
+      const pd = Math.hypot(pdx, pdy) || 1;
+      if (pd < 220) { hx = player.x + pdx / pd * 220; hy = player.y + pdy / pd * 220; }
+      for (const o of hooverStarts) {
+        const odx = hx - o.x, ody = hy - o.y;
+        const od = Math.hypot(odx, ody) || 1;
+        if (od < 180) { hx = o.x + odx / od * 180; hy = o.y + ody / od * 180; }
+      }
+      hx = Math.max(WALL + 40, Math.min(W - WALL - 40, hx));
+      hy = Math.max(WALL + 40, Math.min(H - WALL - 40, hy));
+      hooverStarts.push({x: hx, y: hy});
+    }
+
+    // the hoover grows a hose at level 3, and a longer one at level 8
+    const hoseLength = n >= 8 ? 130 : (n >= 3 ? 70 : 0);
 
     const dIn = doorInsidePoint(side, pos);
     const count = 3 + n; // level 1: 4 pieces ... level 10: 13 pieces
@@ -241,8 +279,10 @@ function genLevel(n) {
                    type: FURNITURE_TYPES[Math.floor(rand() * FURNITURE_TYPES.length)],
                    tone: rand()};
         if (circleRectHit(player.x, player.y, 80, f)) continue;
-        if (circleRectHit(hx, hy, 90, f)) continue;
         if (circleRectHit(dIn.x, dIn.y, 85, f)) continue;
+        let onHoover = false;
+        for (const o of hooverStarts) if (circleRectHit(o.x, o.y, 90, f)) { onHoover = true; break; }
+        if (onHoover) continue;
         let clash = false;
         for (const o of furniture) if (rectsOverlap(f, o, 32)) { clash = true; break; }
         if (clash) continue;
@@ -262,7 +302,8 @@ function genLevel(n) {
       doorInside: dIn,
       furniture,
       playerStart: {x: player.x, y: player.y},
-      hooverStart: {x: hx, y: hy},
+      hooverStarts,
+      hoseLength,
       hooverSpeed: 1.75 + (n - 1) * 0.17, // level 10 ≈ 3.28 (player is 3.5)
       hooverR: 26,
       floor: FLOOR_COLORS[n - 1],
@@ -276,7 +317,8 @@ function genLevel(n) {
   return {
     n, side, pos, walls: buildWalls(side, pos), door: doorRect(side, pos),
     doorInside: doorInsidePoint(side, pos), furniture: [],
-    playerStart: {x: W / 2, y: H - 60}, hooverStart: {x: W / 2, y: H / 2},
+    playerStart: {x: W / 2, y: H - 60},
+    hooverStarts: [{x: W / 2, y: H / 2}], hoseLength: n >= 8 ? 130 : (n >= 3 ? 70 : 0),
     hooverSpeed: 1.75 + (n - 1) * 0.17, hooverR: 26,
     floor: FLOOR_COLORS[n - 1], name: ROOM_NAMES[n - 1]
   };
@@ -289,7 +331,7 @@ let levelNum = 1;
 let attempts = 0;
 let timer = 0;             // generic state timer (frames)
 let player = {x: 0, y: 0};
-let hoover = {x: 0, y: 0, angle: 0};
+let hoovers = [];          // each: {x, y, angle, reach}
 let hooverGrace = 0;       // frames before the hoover starts chasing
 let trail = [];
 let frame = 0;
@@ -314,9 +356,10 @@ function startLevel(n) {
 function resetPositions() {
   player.x = level.playerStart.x;
   player.y = level.playerStart.y;
-  hoover.x = level.hooverStart.x;
-  hoover.y = level.hooverStart.y;
-  hoover.angle = 0;
+  hoovers = level.hooverStarts.map(s => {
+    const dx = player.x - s.x, dy = player.y - s.y;
+    return {x: s.x, y: s.y, angle: Math.atan2(dy, dx), reach: level.hooverR};
+  });
   hooverGrace = 75;
   trail = [];
 }
@@ -449,21 +492,34 @@ function update() {
   if (hooverGrace > 0) {
     hooverGrace--;
   } else {
-    const hdx = player.x - hoover.x, hdy = player.y - hoover.y;
-    const hd = Math.hypot(hdx, hdy) || 1;
     const sp = level.hooverSpeed;
-    hoover.angle = Math.atan2(hdy, hdx);
-    // per-axis movement -> slides around furniture instead of stopping dead
-    hoover.x += hdx / hd * sp;
-    for (const r of level.walls.concat(level.furniture)) [hoover.x, hoover.y] = resolveCircleRect(hoover.x, hoover.y, level.hooverR, r);
-    hoover.y += hdy / hd * sp;
-    for (const r of level.walls.concat(level.furniture)) [hoover.x, hoover.y] = resolveCircleRect(hoover.x, hoover.y, level.hooverR, r);
+    const obstacles = level.walls.concat(level.furniture);
+    const maxLen = level.hooverR + level.hoseLength;
+    for (const hoover of hoovers) {
+      const hdx = player.x - hoover.x, hdy = player.y - hoover.y;
+      const hd = Math.hypot(hdx, hdy) || 1;
+      hoover.angle = Math.atan2(hdy, hdx);
+      // per-axis movement -> slides around furniture instead of stopping dead
+      hoover.x += hdx / hd * sp;
+      for (const r of obstacles) [hoover.x, hoover.y] = resolveCircleRect(hoover.x, hoover.y, level.hooverR, r);
+      hoover.y += hdy / hd * sp;
+      for (const r of obstacles) [hoover.x, hoover.y] = resolveCircleRect(hoover.x, hoover.y, level.hooverR, r);
 
-    // caught?
-    if (Math.hypot(player.x - hoover.x, player.y - hoover.y) < level.hooverR * 0.85 + PLAYER_R) {
-      attempts++;
-      state = "caught";
-      timer = 70;
+      // hose reaches toward the player but is stopped by furniture
+      const dirx = Math.cos(hoover.angle), diry = Math.sin(hoover.angle);
+      hoover.reach = hoseReach(hoover.x, hoover.y, dirx, diry, maxLen);
+      const tipx = hoover.x + dirx * hoover.reach, tipy = hoover.y + diry * hoover.reach;
+
+      // caught by the body, or sucked up along the hose?
+      const bodyHit = Math.hypot(player.x - hoover.x, player.y - hoover.y) < level.hooverR * 0.85 + PLAYER_R;
+      const hoseHit = level.hoseLength > 0 &&
+        pointSegDist(player.x, player.y, hoover.x, hoover.y, tipx, tipy) < PLAYER_R + 6;
+      if (bodyHit || hoseHit) {
+        attempts++;
+        state = "caught";
+        timer = 70;
+        break;
+      }
     }
   }
 }
@@ -620,8 +676,27 @@ function drawPlayer() {
   ctx.beginPath(); ctx.arc(player.x + 3, player.y - 1.5, 1.6, 0, 7); ctx.fill();
 }
 
-function drawHoover() {
+function drawHoover(hoover) {
   const r = level.hooverR;
+
+  // hose: a tube reaching from the body toward the player, cut short by furniture
+  if (level.hoseLength > 0 && hoover.reach > r + 2) {
+    const dirx = Math.cos(hoover.angle), diry = Math.sin(hoover.angle);
+    const sx = hoover.x + dirx * (r - 2), sy = hoover.y + diry * (r - 2);
+    const tx = hoover.x + dirx * hoover.reach, ty = hoover.y + diry * hoover.reach;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "#2a2a2a"; ctx.lineWidth = 13;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+    ctx.strokeStyle = "#565656"; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+    // suction mouth at the tip
+    ctx.fillStyle = "#333";
+    ctx.beginPath(); ctx.arc(tx, ty, 9, 0, 7); ctx.fill();
+    ctx.fillStyle = (state === "playing" && hooverGrace <= 0) ? "rgba(20,20,20,0.95)" : "#555";
+    ctx.beginPath(); ctx.arc(tx, ty, 5, 0, 7); ctx.fill();
+    ctx.lineCap = "butt";
+  }
+
   ctx.save();
   ctx.translate(hoover.x, hoover.y);
   ctx.rotate(hoover.angle);
@@ -749,7 +824,7 @@ function draw() {
   drawWalls();
   drawFurniture();
   drawPlayer();
-  drawHoover();
+  for (const h of hoovers) drawHoover(h);
   drawHUD();
   drawTouchUI();
 
