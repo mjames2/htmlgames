@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Laser Rush Racing</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: #14141f;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    /* stop mobile gestures (scroll/zoom/pull-to-refresh) interfering with play */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  /* Scale the whole game (canvas + overlay screens) to fit any screen while
+     keeping the 960x540 aspect ratio. 960/540 = 1.7778 → 177.78vh wide cap. */
+  #wrap {
+    position: relative;
+    width: min(960px, 100vw, 177.78vh);
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 12px;
+    box-shadow: 0 0 40px rgba(0,0,0,.6);
+    background: #1d2b1d;
+  }
+  .screen {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,10,20,.92);
+    border-radius: 12px;
+    text-align: center;
+    gap: 18px;
+  }
+  .hidden { display: none; }
+  .screen { padding: 4%; }
+  h1 { font-size: clamp(26px, 8vw, 44px); letter-spacing: 2px; }
+  h1 span { color: #ff3355; text-shadow: 0 0 18px #ff3355; }
+  .swatches { display: flex; flex-wrap: wrap; justify-content: center; gap: clamp(8px, 2.5vw, 14px); max-width: 94%; }
+  .swatch {
+    width: clamp(40px, 12vw, 54px); height: clamp(40px, 12vw, 54px);
+    border-radius: 50%;
+    border: 4px solid transparent;
+    cursor: pointer;
+    transition: transform .15s, border-color .15s;
+  }
+  .swatch:hover { transform: scale(1.15); }
+  .swatch.picked { border-color: #fff; transform: scale(1.2); box-shadow: 0 0 16px currentColor; }
+  button.big {
+    font-size: clamp(17px, 5vw, 22px);
+    padding: clamp(10px, 2.5vw, 12px) clamp(28px, 9vw, 44px);
+    border: none;
+    border-radius: 30px;
+    background: #ff3355;
+    color: #fff;
+    cursor: pointer;
+    font-weight: bold;
+    letter-spacing: 1px;
+    transition: transform .15s, opacity .15s;
+  }
+  button.big:disabled { opacity: .35; cursor: not-allowed; }
+  button.big:not(:disabled):hover { transform: scale(1.07); }
+  .hint { color: #aab; font-size: clamp(12px, 3.3vw, 15px); line-height: 1.6; }
+  #resultText { font-size: clamp(16px, 4.8vw, 26px); line-height: 1.7; }
+
+  /* ---- On-screen touch controls (shown only on touch devices) ---- */
+  #touchControls { display: none; }
+  body.touch #touchControls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: absolute;
+    right: 3%;
+    bottom: 6%;
+    z-index: 5;
+  }
+  body.touch.menu #touchControls,
+  body.touch.finished #touchControls { display: none; }
+  .padBtn {
+    width: clamp(54px, 16vw, 84px);
+    height: clamp(54px, 16vw, 84px);
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.5);
+    background: rgba(0,0,0,.42);
+    color: #fff;
+    font-size: clamp(26px, 8vw, 40px);
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+  }
+  .padBtn:active { background: #ff3355; transform: scale(.94); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+
+  <div id="menu" class="screen">
+    <h1>LASER <span>RUSH</span> RACING</h1>
+    <p class="hint">Pick your car colour from the rainbow:</p>
+    <div class="swatches" id="swatches"></div>
+    <button class="big" id="startBtn" disabled>START RACE</button>
+    <p class="hint">
+      Tap the ▲ / ▼ buttons (or swipe up / down) — on a keyboard use ⬆️ / ⬇️ (W / S) — to change lanes and dodge the obstacles.<br>
+      Hitting cones slows you down — if the <b style="color:#ff3355">LASER</b> catches you,
+      that's a <b>+5 second penalty!</b><br>
+      <b>10 levels</b> — the laser gets faster every level, and from
+      <b>level 5</b> long roadblocks cross more than one lane!
+    </p>
+  </div>
+
+  <div id="results" class="screen hidden">
+    <h1 id="resultTitle">🏁 FINISH!</h1>
+    <p id="resultText"></p>
+    <button class="big" id="againBtn">RACE AGAIN</button>
+  </div>
+
+  <div id="touchControls">
+    <div class="padBtn" id="padUp">▲</div>
+    <div class="padBtn" id="padDown">▼</div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// ---- Rainbow colour picker ----
+const RAINBOW = [
+  ['Red',    '#ff2d2d'], ['Orange', '#ff8c1a'], ['Yellow', '#ffd400'],
+  ['Green',  '#2ecc40'], ['Blue',   '#1e90ff'], ['Indigo', '#5b3cc4'],
+  ['Violet', '#c13ce0'],
+];
+let playerColor = null;
+const swatchBox = document.getElementById('swatches');
+const startBtn = document.getElementById('startBtn');
+RAINBOW.forEach(([name, col]) => {
+  const d = document.createElement('div');
+  d.className = 'swatch';
+  d.style.background = col;
+  d.style.color = col;
+  d.title = name;
+  d.onclick = () => {
+    document.querySelectorAll('.swatch').forEach(s => s.classList.remove('picked'));
+    d.classList.add('picked');
+    playerColor = col;
+    startBtn.disabled = false;
+  };
+  swatchBox.appendChild(d);
+});
+
+// ---- Track layout ----
+const ROAD_TOP = 130, ROAD_BOT = H - 60;
+const LANES = 4;
+const laneY = i => ROAD_TOP + (ROAD_BOT - ROAD_TOP) * (i + 0.5) / LANES;
+const RACE_LENGTH = 12000;
+
+const CAR_W = 74, CAR_H = 34;
+const PLAYER_SCREEN_X = 240;      // where the player sits when cruising
+const MAX_SPEED = 430, ACCEL = 180;
+const MAX_LEVEL = 10;
+const laserSpeedFor = lvl => 310 + lvl * 10;   // level 1: 320 → level 10: 410
+
+let level = 1;
+let state = 'menu';   // menu | racing | finished
+function setState(s) {
+  state = s;
+  document.body.classList.remove('menu', 'racing', 'finished');
+  document.body.classList.add(s);
+}
+let player, ais, cones, blocks, laserX, cameraX, elapsed, penalties, lastTime;
+let flashTimer = 0, msgTimer = 0, msgText = '';
+
+function makeCone(x, lane) { return { x, lane, hit: false, spin: 0 }; }
+
+function buildCones(blockList) {
+  const list = [];
+  let x = 900;
+  while (x < RACE_LENGTH - 600) {
+    // keep cones away from roadblocks so there's always a way through
+    if (!blockList.some(b => Math.abs(b.x - x) < 220)) {
+      const count = Math.random() < 0.45 ? 2 : 1;        // 1 or 2 cones per cluster
+      const lanes = [0, 1, 2, 3].sort(() => Math.random() - 0.5).slice(0, count);
+      lanes.forEach(l => list.push(makeCone(x + Math.random() * 60, l)));
+    }
+    x += 240 + Math.random() * 260;
+  }
+  return list;
+}
+
+function buildBlocks() {
+  if (level < 5) return [];                              // roadblocks start at level 5
+  const list = [];
+  let x = 1400;
+  const gap = Math.max(700, 1500 - level * 60);
+  while (x < RACE_LENGTH - 800) {
+    const span = level >= 8 && Math.random() < 0.5 ? 3 : 2;   // lanes covered
+    const lane0 = Math.floor(Math.random() * (LANES - span + 1));
+    list.push({ x, lane0, span, hit: false, fade: 0 });
+    x += gap + Math.random() * 400;
+  }
+  return list;
+}
+
+function startRace() {
+  document.getElementById('menu').classList.add('hidden');
+  document.getElementById('results').classList.add('hidden');
+  player = { x: 0, lane: 1, yLane: 1, speed: 0, invuln: 0, finished: false, time: 0 };
+  const aiCols = RAINBOW.map(r => r[1]).filter(c => c !== playerColor);
+  ais = [0, 2, 3].map((lane, i) => ({
+    x: -40 - i * 30, lane, yLane: lane,
+    speed: 0, base: 330 + Math.random() * 55,
+    color: aiCols[Math.floor(Math.random() * aiCols.length)],
+    wobble: Math.random() * 10, finished: false, time: 0,
+  }));
+  blocks = buildBlocks();
+  cones = buildCones(blocks);
+  laserX = -420;
+  elapsed = 0; penalties = 0;
+  flashTimer = 0; msgTimer = 0;
+  msgText = 'LEVEL ' + level;
+  msgTimer = 1.6;
+  setState('racing');
+  lastTime = performance.now();
+  requestAnimationFrame(loop);
+}
+startBtn.onclick = () => { level = 1; startRace(); };
+document.getElementById('againBtn').onclick = () => {
+  document.getElementById('results').classList.add('hidden');
+  if (level < MAX_LEVEL) {
+    level++;
+    startRace();
+  } else {
+    level = 1;
+    document.getElementById('menu').classList.remove('hidden');
+    setState('menu');
+    draw(); // idle backdrop
+  }
+};
+
+// ---- Input ----
+function canSteer() { return state === 'racing' && player && !player.finished; }
+function laneUp()   { if (canSteer()) player.lane = Math.max(0, player.lane - 1); }
+function laneDown() { if (canSteer()) player.lane = Math.min(LANES - 1, player.lane + 1); }
+
+const keys = {};
+addEventListener('keydown', e => {
+  if (['ArrowUp', 'ArrowDown', 'KeyW', 'KeyS'].includes(e.code)) e.preventDefault();
+  if (keys[e.code]) return;
+  keys[e.code] = true;
+  if (e.code === 'ArrowUp'   || e.code === 'KeyW') laneUp();
+  if (e.code === 'ArrowDown' || e.code === 'KeyS') laneDown();
+});
+addEventListener('keyup', e => keys[e.code] = false);
+
+// ---- Touch input ----
+if (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window) {
+  document.body.classList.add('touch');
+}
+
+function bindHold(el, fn) {
+  el.addEventListener('touchstart', e => { e.preventDefault(); fn(); }, { passive: false });
+  el.addEventListener('mousedown',  e => { e.preventDefault(); fn(); });
+}
+bindHold(document.getElementById('padUp'), laneUp);
+bindHold(document.getElementById('padDown'), laneDown);
+
+// Swipe / tap-half on the canvas as an alternative to the buttons
+let touchStartY = null;
+canvas.addEventListener('touchstart', e => {
+  touchStartY = e.changedTouches[0].clientY;
+}, { passive: true });
+canvas.addEventListener('touchend', e => {
+  if (touchStartY === null) return;
+  const endY = e.changedTouches[0].clientY;
+  const dy = endY - touchStartY;
+  if (Math.abs(dy) > 24) {
+    dy < 0 ? laneUp() : laneDown();          // swipe up / down
+  } else {
+    // a tap: top half steers up, bottom half steers down
+    const rect = canvas.getBoundingClientRect();
+    endY - rect.top < rect.height / 2 ? laneUp() : laneDown();
+  }
+  touchStartY = null;
+}, { passive: true });
+
+// ---- Update ----
+function update(dt) {
+  elapsed += dt;
+
+  // player physics
+  if (!player.finished) {
+    player.speed = Math.min(MAX_SPEED, player.speed + ACCEL * dt);
+    player.x += player.speed * dt;
+    player.yLane += (player.lane - player.yLane) * Math.min(1, dt * 10);
+    if (player.invuln > 0) player.invuln -= dt;
+
+    // cone collisions
+    for (const c of cones) {
+      if (c.hit || player.invuln > 0) continue;
+      if (Math.abs(c.lane - player.yLane) < 0.45 &&
+          Math.abs(c.x - player.x) < CAR_W * 0.55) {
+        c.hit = true;
+        player.speed = Math.min(player.speed, 90);
+      }
+    }
+
+    // roadblock collisions (bigger slowdown than cones)
+    for (const b of blocks) {
+      if (b.hit || player.invuln > 0) continue;
+      if (Math.abs(b.x - player.x) < CAR_W * 0.55 + 9 &&
+          player.yLane > b.lane0 - 0.45 &&
+          player.yLane < b.lane0 + b.span - 1 + 0.45) {
+        b.hit = true;
+        player.speed = Math.min(player.speed, 55);
+      }
+    }
+
+    if (player.x >= RACE_LENGTH) {
+      player.finished = true;
+      player.time = elapsed + penalties * 5;
+      setTimeout(showResults, 1200);
+    }
+  }
+
+  // laser chases — faster every level
+  laserX += laserSpeedFor(level) * dt;
+  if (!player.finished && player.invuln <= 0 && laserX >= player.x - CAR_W / 2) {
+    penalties++;
+    player.invuln = 2;
+    player.speed = MAX_SPEED;            // mercy boost so you can escape
+    laserX = player.x - 560;             // laser resets behind you
+    flashTimer = 0.5;
+    msgText = '⚡ ZAPPED! +5 SECOND PENALTY!';
+    msgTimer = 2.2;
+  }
+
+  // AI cars
+  for (const a of ais) {
+    if (a.finished) continue;
+    a.wobble += dt;
+    const target = a.base + Math.sin(a.wobble * 0.7) * 35;
+    a.speed = Math.min(target, a.speed + ACCEL * dt);
+    a.x += a.speed * dt;
+    // AI dodges cones (mostly)
+    for (const c of cones) {
+      if (!c.hit && c.lane === a.lane && c.x - a.x > 0 && c.x - a.x < 220 && Math.random() < dt * 6) {
+        a.lane = c.lane === 0 ? 1 : c.lane === LANES - 1 ? LANES - 2 : c.lane + (Math.random() < 0.5 ? -1 : 1);
+      }
+    }
+    // AI dodges roadblocks
+    for (const b of blocks) {
+      if (!b.hit && a.lane >= b.lane0 && a.lane <= b.lane0 + b.span - 1 &&
+          b.x - a.x > 0 && b.x - a.x < 280 && Math.random() < dt * 8) {
+        a.lane = b.lane0 > 0 ? b.lane0 - 1 : b.lane0 + b.span;
+      }
+    }
+    a.yLane += (a.lane - a.yLane) * Math.min(1, dt * 8);
+    if (a.x >= RACE_LENGTH) { a.finished = true; a.time = elapsed; }
+  }
+
+  // animate hit cones and smashed roadblocks
+  for (const c of cones) if (c.hit && c.spin < 1) c.spin = Math.min(1, c.spin + dt * 2);
+  for (const b of blocks) if (b.hit && b.fade < 1) b.fade = Math.min(1, b.fade + dt * 2);
+
+  if (flashTimer > 0) flashTimer -= dt;
+  if (msgTimer > 0) msgTimer -= dt;
+
+  cameraX = player.x - PLAYER_SCREEN_X;
+}
+
+function showResults() {
+  setState('finished');
+  const beaten = ais.filter(a => !a.finished || a.time > player.time).length;
+  const place = ais.length - beaten + 1;
+  const medal = ['🥇', '🥈', '🥉', '🏅'][place - 1];
+  const last = level >= MAX_LEVEL;
+  document.getElementById('resultTitle').textContent =
+    last ? '🏆 CHAMPION!' : `🏁 LEVEL ${level} COMPLETE!`;
+  document.getElementById('resultText').innerHTML =
+    `${medal} You finished <b>${ordinal(place)}</b> of ${ais.length + 1}<br>` +
+    `Race time: <b>${(player.time - penalties * 5).toFixed(2)}s</b><br>` +
+    `Laser penalties: <b style="color:#ff3355">${penalties} × 5s = +${penalties * 5}s</b><br>` +
+    `Final time: <b>${player.time.toFixed(2)}s</b>` +
+    (last
+      ? `<br><b style="color:#ffd400">You beat all ${MAX_LEVEL} levels! 🎉</b>`
+      : `<br><span style="color:#ff7788">⚠ The laser gets faster on level ${level + 1}` +
+        (level === 4 ? ' — and long roadblocks appear!' : '!') + `</span>`);
+  document.getElementById('againBtn').textContent =
+    last ? 'PLAY AGAIN' : 'NEXT LEVEL ▶';
+  document.getElementById('results').classList.remove('hidden');
+}
+const ordinal = n => n + (['th','st','nd','rd'][(n%100>10 && n%100<14) ? 0 : Math.min(n%10,4)] || 'th');
+
+// ---- Drawing ----
+function drawCar(sx, sy, color, flicker) {
+  if (flicker && Math.floor(performance.now() / 80) % 2) return;
+  ctx.save();
+  ctx.translate(sx, sy);
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,.35)';
+  ctx.beginPath(); ctx.ellipse(0, CAR_H * 0.55, CAR_W * 0.5, 8, 0, 0, 7); ctx.fill();
+  // wheels
+  ctx.fillStyle = '#111';
+  [[-CAR_W*0.28, -CAR_H*0.55], [CAR_W*0.28, -CAR_H*0.55], [-CAR_W*0.28, CAR_H*0.38], [CAR_W*0.28, CAR_H*0.38]]
+    .forEach(([x, y]) => { ctx.beginPath(); ctx.roundRect(x - 9, y, 18, 9, 4); ctx.fill(); });
+  // body
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.roundRect(-CAR_W / 2, -CAR_H / 2, CAR_W, CAR_H, 10); ctx.fill();
+  // nose highlight
+  ctx.fillStyle = 'rgba(255,255,255,.25)';
+  ctx.beginPath(); ctx.roundRect(CAR_W * 0.18, -CAR_H / 2 + 4, CAR_W * 0.26, CAR_H - 8, 6); ctx.fill();
+  // window
+  ctx.fillStyle = '#bfe8ff';
+  ctx.beginPath(); ctx.roundRect(-CAR_W * 0.18, -CAR_H * 0.32, CAR_W * 0.3, CAR_H * 0.64, 5); ctx.fill();
+  ctx.restore();
+}
+
+function drawBlock(b, cam) {
+  const sx = b.x - cam;
+  if (sx < -60 || sx > W + 60) return;
+  const laneH = (ROAD_BOT - ROAD_TOP) / LANES;
+  const top = ROAD_TOP + laneH * b.lane0 + 6;
+  const h = laneH * b.span - 12;
+  ctx.save();
+  ctx.globalAlpha = 1 - b.fade * 0.9;
+  ctx.translate(sx, top - b.fade * 30);
+  ctx.rotate(b.fade * 0.5);
+  ctx.fillStyle = '#e8e8e8';
+  ctx.fillRect(-10, 0, 20, h);
+  ctx.beginPath(); ctx.rect(-10, 0, 20, h); ctx.clip();
+  ctx.strokeStyle = '#e03030'; ctx.lineWidth = 9;
+  for (let y = -24; y < h + 24; y += 22) {
+    ctx.beginPath(); ctx.moveTo(-14, y); ctx.lineTo(14, y + 16); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCone(sx, sy, spin) {
+  ctx.save();
+  ctx.translate(sx, sy + (spin > 0 ? -spin * 40 * Math.sin(spin * Math.PI) : 0));
+  ctx.rotate(spin * 5);
+  ctx.globalAlpha = 1 - spin * 0.7;
+  ctx.fillStyle = '#ff7300';
+  ctx.beginPath();
+  ctx.moveTo(0, -20); ctx.lineTo(13, 12); ctx.lineTo(-13, 12); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-8, -4, 16, 6);
+  ctx.restore();
+}
+
+function draw() {
+  const cam = state === 'racing' ? cameraX : 0;
+  const t = performance.now() / 1000;
+
+  // sky
+  const sky = ctx.createLinearGradient(0, 0, 0, ROAD_TOP);
+  sky.addColorStop(0, '#2a2a55'); sky.addColorStop(1, '#5050a0');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, ROAD_TOP);
+  // distant hills (parallax)
+  ctx.fillStyle = '#223a3a';
+  for (let i = -1; i < 8; i++) {
+    const hx = ((i * 260 - cam * 0.25) % (W + 520) + W + 520) % (W + 520) - 260;
+    ctx.beginPath(); ctx.ellipse(hx, ROAD_TOP, 190, 70, 0, Math.PI, 0); ctx.fill();
+  }
+  // grass
+  ctx.fillStyle = '#2c5e2c'; ctx.fillRect(0, ROAD_TOP - 14, W, ROAD_BOT - ROAD_TOP + 28);
+  // road
+  ctx.fillStyle = '#3a3a44'; ctx.fillRect(0, ROAD_TOP, W, ROAD_BOT - ROAD_TOP);
+  // edges
+  ctx.fillStyle = '#e8e8e8';
+  ctx.fillRect(0, ROAD_TOP, W, 5); ctx.fillRect(0, ROAD_BOT - 5, W, 5);
+  // lane dashes
+  ctx.strokeStyle = 'rgba(255,255,255,.5)';
+  ctx.lineWidth = 4; ctx.setLineDash([34, 26]);
+  ctx.lineDashOffset = cam % 60;
+  for (let i = 1; i < LANES; i++) {
+    const y = ROAD_TOP + (ROAD_BOT - ROAD_TOP) * i / LANES;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  if (state === 'menu') {
+    // simple idle backdrop only
+    return;
+  }
+
+  // finish line
+  const fx = RACE_LENGTH - cam;
+  if (fx > -60 && fx < W + 60) {
+    for (let y = ROAD_TOP; y < ROAD_BOT; y += 20)
+      for (let k = 0; k < 2; k++) {
+        ctx.fillStyle = ((y / 20 + k) % 2 < 1) ? '#fff' : '#111';
+        ctx.fillRect(fx + k * 14, y, 14, 20);
+      }
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('FINISH', fx + 14, ROAD_TOP - 24);
+  }
+
+  // roadblocks
+  for (const b of blocks) drawBlock(b, cam);
+
+  // cones
+  for (const c of cones) {
+    const sx = c.x - cam;
+    if (sx > -40 && sx < W + 40) drawCone(sx, laneY(c.lane), c.spin);
+  }
+
+  // AI cars
+  for (const a of ais) {
+    const sx = a.x - cam;
+    if (sx > -120 && sx < W + 120) drawCar(sx, laneY(a.yLane), a.color, false);
+  }
+
+  // player
+  drawCar(player.x - cam, laneY(player.yLane), playerColor, player.invuln > 0);
+
+  // ---- LASER ----
+  const lx = laserX - cam;
+  if (lx > -80) {
+    const beamX = Math.min(lx, W);
+    // filled danger zone behind the beam
+    const zone = ctx.createLinearGradient(beamX - 120, 0, beamX, 0);
+    zone.addColorStop(0, 'rgba(255,30,60,0)');
+    zone.addColorStop(1, 'rgba(255,30,60,.45)');
+    ctx.fillStyle = zone;
+    ctx.fillRect(beamX - 120, 0, 120, H);
+    if (beamX > 120) {
+      ctx.fillStyle = 'rgba(255,30,60,.45)';
+      ctx.fillRect(0, 0, beamX - 120, H);
+    }
+    // crackling beam
+    ctx.strokeStyle = '#ff3355';
+    ctx.lineWidth = 6;
+    ctx.shadowColor = '#ff3355'; ctx.shadowBlur = 25;
+    ctx.beginPath();
+    for (let y = 0; y <= H; y += 12)
+      ctx.lineTo(beamX + Math.sin(y * 0.12 + t * 22) * 5, y);
+    ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let y = 0; y <= H; y += 12)
+      ctx.lineTo(beamX + Math.sin(y * 0.12 + t * 22) * 5, y);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  // ---- HUD ----
+  ctx.fillStyle = 'rgba(0,0,0,.55)';
+  ctx.beginPath(); ctx.roundRect(12, 12, 360, 86, 10); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 24px monospace'; ctx.textAlign = 'left';
+  const shown = elapsed + penalties * 5;
+  ctx.fillText('⏱ ' + shown.toFixed(1) + 's', 26, 44);
+  ctx.fillStyle = '#ffd400';
+  ctx.fillText('LEVEL ' + level + '/' + MAX_LEVEL, 200, 44);
+  ctx.font = '16px monospace';
+  ctx.fillStyle = penalties ? '#ff7788' : '#9ab';
+  ctx.fillText('Penalties: ' + penalties + '  (+' + penalties * 5 + 's)', 26, 70);
+  ctx.fillStyle = '#9ab';
+  ctx.fillText('Speed: ' + Math.round(player.speed * 0.4) + ' km/h', 26, 90);
+
+  // progress bar
+  ctx.fillStyle = 'rgba(0,0,0,.55)';
+  ctx.beginPath(); ctx.roundRect(W - 312, 12, 300, 30, 8); ctx.fill();
+  ctx.fillStyle = '#444'; ctx.fillRect(W - 300, 24, 276, 6);
+  ctx.fillStyle = playerColor;
+  ctx.fillRect(W - 300, 24, 276 * Math.min(1, player.x / RACE_LENGTH), 6);
+  // laser marker on progress bar
+  ctx.fillStyle = '#ff3355';
+  ctx.fillRect(W - 300 + 276 * Math.max(0, Math.min(1, laserX / RACE_LENGTH)) - 2, 18, 4, 18);
+
+  // penalty flash + message
+  if (flashTimer > 0) {
+    ctx.fillStyle = `rgba(255,40,60,${flashTimer * 0.8})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (msgTimer > 0) {
+    ctx.font = 'bold 34px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = msgText.startsWith('LEVEL') ? '#ffd400' : '#ff3355';
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 8;
+    ctx.fillText(msgText, W / 2, 150);
+    ctx.shadowBlur = 0;
+  }
+  if (player.finished) {
+    ctx.font = 'bold 48px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 10;
+    ctx.fillText('🏁 FINISHED!', W / 2, H / 2);
+    ctx.shadowBlur = 0;
+  }
+}
+
+// ---- Main loop ----
+function loop(now) {
+  if (state !== 'racing') return;
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+setState('menu');
+draw(); // initial backdrop behind the menu
+</script>
+</body>
+</html>
