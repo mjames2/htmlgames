@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#1b1b22">
+<title>DUST! — Escape the Hoover</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; background: #1b1b22; color: #eee;
+    font-family: "Segoe UI", Arial, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; justify-content: center;
+    overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #wrap { text-align: center; padding: 8px; box-sizing: border-box; width: 100%; }
+  canvas {
+    background: #222; border-radius: 8px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.6);
+    max-width: 100%; max-height: 88vh; height: auto;
+    touch-action: none;
+  }
+  #hint { margin-top: 10px; color: #999; font-size: 14px; }
+  @media (pointer: coarse) {
+    #hint .kb { display: none; }
+    #hint .touch { display: inline !important; }
+  }
+  kbd {
+    background: #333; border-radius: 4px; padding: 1px 6px;
+    border: 1px solid #555; font-family: inherit;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="900" height="600"></canvas>
+  <div id="hint"><span class="kb">Move: <kbd>←↑↓→</kbd> or <kbd>WASD</kbd> &nbsp;·&nbsp; Restart level: <kbd>R</kbd> &nbsp;·&nbsp; </span>Reach the <b style="color:#ffd23f">yellow door</b>, dodge the furniture, escape the hoover! <span class="touch" style="display:none">Drag to move.</span></div>
+</div>
+<script>
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+const W = 900, H = 600;
+const WALL = 18;
+const NUM_LEVELS = 10;
+const PLAYER_R = 9;
+const PLAYER_SPEED = 3.5;
+const DOOR_W = 80;
+
+const ROOM_NAMES = [
+  "The Hallway", "The Living Room", "The Kitchen", "The Dining Room",
+  "The Bathroom", "The Bedroom", "The Study", "The Kids' Room",
+  "The Laundry Room", "The Attic"
+];
+
+const FLOOR_COLORS = [
+  "#b89b72", "#a8855f", "#c2a878", "#9c7a55", "#bcd0d4",
+  "#a293b8", "#8f7a5e", "#9fc2a0", "#c9c2b8", "#7d6b54"
+];
+
+const FURNITURE_TYPES = ["sofa", "table", "bed", "cabinet", "plant", "chair"];
+
+// ---------- seeded random ----------
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- geometry helpers ----------
+function rectsOverlap(a, b, gap) {
+  gap = gap || 0;
+  return a.x < b.x + b.w + gap && a.x + a.w + gap > b.x &&
+         a.y < b.y + b.h + gap && a.y + a.h + gap > b.y;
+}
+
+function circleRectHit(cx, cy, r, rect) {
+  const nx = Math.max(rect.x, Math.min(cx, rect.x + rect.w));
+  const ny = Math.max(rect.y, Math.min(cy, rect.y + rect.h));
+  const dx = cx - nx, dy = cy - ny;
+  return dx * dx + dy * dy < r * r;
+}
+
+// Push a circle out of a rect, returns corrected position.
+function resolveCircleRect(cx, cy, r, rect) {
+  if (!circleRectHit(cx, cy, r, rect)) return [cx, cy];
+  const left   = cx - (rect.x - r);
+  const right  = (rect.x + rect.w + r) - cx;
+  const top    = cy - (rect.y - r);
+  const bottom = (rect.y + rect.h + r) - cy;
+  const m = Math.min(left, right, top, bottom);
+  if (m === left)  cx = rect.x - r;
+  else if (m === right) cx = rect.x + rect.w + r;
+  else if (m === top)   cy = rect.y - r;
+  else cy = rect.y + rect.h + r;
+  return [cx, cy];
+}
+
+// ---------- level generation ----------
+function buildWalls(doorSide, doorPos) {
+  // Each wall is split around the door gap on its side.
+  const walls = [];
+  // top
+  if (doorSide === 0) {
+    walls.push({x: 0, y: 0, w: doorPos, h: WALL});
+    walls.push({x: doorPos + DOOR_W, y: 0, w: W - doorPos - DOOR_W, h: WALL});
+  } else walls.push({x: 0, y: 0, w: W, h: WALL});
+  // bottom
+  if (doorSide === 1) {
+    walls.push({x: 0, y: H - WALL, w: doorPos, h: WALL});
+    walls.push({x: doorPos + DOOR_W, y: H - WALL, w: W - doorPos - DOOR_W, h: WALL});
+  } else walls.push({x: 0, y: H - WALL, w: W, h: WALL});
+  // left
+  if (doorSide === 2) {
+    walls.push({x: 0, y: 0, w: WALL, h: doorPos});
+    walls.push({x: 0, y: doorPos + DOOR_W, w: WALL, h: H - doorPos - DOOR_W});
+  } else walls.push({x: 0, y: 0, w: WALL, h: H});
+  // right
+  if (doorSide === 3) {
+    walls.push({x: W - WALL, y: 0, w: WALL, h: doorPos});
+    walls.push({x: W - WALL, y: doorPos + DOOR_W, w: WALL, h: H - doorPos - DOOR_W});
+  } else walls.push({x: W - WALL, y: 0, w: WALL, h: H});
+  return walls;
+}
+
+function doorRect(side, pos) {
+  if (side === 0) return {x: pos, y: 0, w: DOOR_W, h: WALL};
+  if (side === 1) return {x: pos, y: H - WALL, w: DOOR_W, h: WALL};
+  if (side === 2) return {x: 0, y: pos, w: WALL, h: DOOR_W};
+  return {x: W - WALL, y: pos, w: WALL, h: DOOR_W};
+}
+
+function doorInsidePoint(side, pos) {
+  const d = WALL + 30;
+  if (side === 0) return {x: pos + DOOR_W / 2, y: d};
+  if (side === 1) return {x: pos + DOOR_W / 2, y: H - d};
+  if (side === 2) return {x: d, y: pos + DOOR_W / 2};
+  return {x: W - d, y: pos + DOOR_W / 2};
+}
+
+// Coarse grid BFS to ensure the player can actually reach the door.
+function pathExists(furniture, start, goal) {
+  const cell = 20;
+  const cols = Math.floor(W / cell), rows = Math.floor(H / cell);
+  const blocked = new Uint8Array(cols * rows);
+  const pad = PLAYER_R + 2;
+  for (let cy = 0; cy < rows; cy++) {
+    for (let cx = 0; cx < cols; cx++) {
+      const r = {x: cx * cell, y: cy * cell, w: cell, h: cell};
+      if (r.x < WALL + pad - cell || r.y < WALL + pad - cell ||
+          r.x + r.w > W - WALL - pad + cell || r.y + r.h > H - WALL - pad + cell) {
+        // border cells handled below via furniture-style check
+      }
+      let b = r.x + cell < WALL + pad || r.y + cell < WALL + pad ||
+              r.x > W - WALL - pad || r.y > H - WALL - pad;
+      if (!b) {
+        for (const f of furniture) {
+          if (rectsOverlap(r, {x: f.x - pad, y: f.y - pad, w: f.w + 2 * pad, h: f.h + 2 * pad})) { b = true; break; }
+        }
+      }
+      blocked[cy * cols + cx] = b ? 1 : 0;
+    }
+  }
+  function cellOf(p) {
+    return [Math.min(cols - 1, Math.max(0, Math.floor(p.x / cell))),
+            Math.min(rows - 1, Math.max(0, Math.floor(p.y / cell)))];
+  }
+  // find nearest open cell to a point
+  function openNear(p) {
+    const [px, py] = cellOf(p);
+    for (let rad = 0; rad < 6; rad++) {
+      for (let dy = -rad; dy <= rad; dy++) for (let dx = -rad; dx <= rad; dx++) {
+        const x = px + dx, y = py + dy;
+        if (x >= 0 && y >= 0 && x < cols && y < rows && !blocked[y * cols + x]) return [x, y];
+      }
+    }
+    return null;
+  }
+  const s = openNear(start), g = openNear(goal);
+  if (!s || !g) return false;
+  const seen = new Uint8Array(cols * rows);
+  const q = [s];
+  seen[s[1] * cols + s[0]] = 1;
+  while (q.length) {
+    const [x, y] = q.shift();
+    if (x === g[0] && y === g[1]) return true;
+    for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && ny >= 0 && nx < cols && ny < rows) {
+        const i = ny * cols + nx;
+        if (!seen[i] && !blocked[i]) { seen[i] = 1; q.push([nx, ny]); }
+      }
+    }
+  }
+  return false;
+}
+
+function genLevel(n) {
+  for (let attempt = 0; attempt < 80; attempt++) {
+    const rand = mulberry32(n * 7919 + attempt * 104729 + 17);
+    const side = Math.floor(rand() * 4);
+    const span = (side < 2 ? W : H) - 2 * WALL - DOOR_W;
+    const pos = WALL + Math.floor(rand() * span);
+
+    // player starts at the opposite side of the room from the door
+    const player = {x: 0, y: 0};
+    if (side === 0)      { player.x = W / 2 + (rand() - 0.5) * 300; player.y = H - WALL - 50; }
+    else if (side === 1) { player.x = W / 2 + (rand() - 0.5) * 300; player.y = WALL + 50; }
+    else if (side === 2) { player.x = W - WALL - 50; player.y = H / 2 + (rand() - 0.5) * 200; }
+    else                 { player.x = WALL + 50;     player.y = H / 2 + (rand() - 0.5) * 200; }
+
+    // hoover starts near the centre, pushed away from the player
+    let hx = W / 2 + (rand() - 0.5) * 160;
+    let hy = H / 2 + (rand() - 0.5) * 120;
+    const pdx = hx - player.x, pdy = hy - player.y;
+    const pd = Math.hypot(pdx, pdy) || 1;
+    if (pd < 220) { hx = player.x + pdx / pd * 220; hy = player.y + pdy / pd * 220; }
+    hx = Math.max(WALL + 40, Math.min(W - WALL - 40, hx));
+    hy = Math.max(WALL + 40, Math.min(H - WALL - 40, hy));
+
+    const dIn = doorInsidePoint(side, pos);
+    const count = 3 + n; // level 1: 4 pieces ... level 10: 13 pieces
+    const furniture = [];
+    let placed = true;
+
+    for (let i = 0; i < count; i++) {
+      let ok = false;
+      for (let t = 0; t < 50; t++) {
+        const fw = 55 + rand() * 95;
+        const fh = 55 + rand() * 95;
+        const fx = WALL + 14 + rand() * (W - 2 * WALL - 28 - fw);
+        const fy = WALL + 14 + rand() * (H - 2 * WALL - 28 - fh);
+        const f = {x: fx, y: fy, w: fw, h: fh,
+                   type: FURNITURE_TYPES[Math.floor(rand() * FURNITURE_TYPES.length)],
+                   tone: rand()};
+        if (circleRectHit(player.x, player.y, 80, f)) continue;
+        if (circleRectHit(hx, hy, 90, f)) continue;
+        if (circleRectHit(dIn.x, dIn.y, 85, f)) continue;
+        let clash = false;
+        for (const o of furniture) if (rectsOverlap(f, o, 32)) { clash = true; break; }
+        if (clash) continue;
+        furniture.push(f);
+        ok = true;
+        break;
+      }
+      if (!ok) { placed = false; break; }
+    }
+    if (!placed) continue;
+    if (!pathExists(furniture, player, dIn)) continue;
+
+    return {
+      n, side, pos,
+      walls: buildWalls(side, pos),
+      door: doorRect(side, pos),
+      doorInside: dIn,
+      furniture,
+      playerStart: {x: player.x, y: player.y},
+      hooverStart: {x: hx, y: hy},
+      hooverSpeed: 1.75 + (n - 1) * 0.17, // level 10 ≈ 3.28 (player is 3.5)
+      hooverR: 26,
+      floor: FLOOR_COLORS[n - 1],
+      name: ROOM_NAMES[n - 1]
+    };
+  }
+  // extremely unlikely fallback: empty room
+  const rand = mulberry32(n);
+  const side = Math.floor(rand() * 4);
+  const pos = WALL + 100;
+  return {
+    n, side, pos, walls: buildWalls(side, pos), door: doorRect(side, pos),
+    doorInside: doorInsidePoint(side, pos), furniture: [],
+    playerStart: {x: W / 2, y: H - 60}, hooverStart: {x: W / 2, y: H / 2},
+    hooverSpeed: 1.75 + (n - 1) * 0.17, hooverR: 26,
+    floor: FLOOR_COLORS[n - 1], name: ROOM_NAMES[n - 1]
+  };
+}
+
+// ---------- game state ----------
+let state = "title";       // title | banner | playing | caught | win
+let level = null;
+let levelNum = 1;
+let attempts = 0;
+let timer = 0;             // generic state timer (frames)
+let player = {x: 0, y: 0};
+let hoover = {x: 0, y: 0, angle: 0};
+let hooverGrace = 0;       // frames before the hoover starts chasing
+let trail = [];
+let frame = 0;
+const keys = {};
+
+// touch / pointer controls
+const touchMove = { active: false, dx: 0, dy: 0 };   // normalized movement vector
+const joystick = { id: null, ox: 0, oy: 0, cx: 0, cy: 0 }; // canvas-space joystick
+const JOY_MAX = 60, JOY_DEAD = 8;
+const RESTART_BTN = { x: W - 116, y: 12, w: 104, h: 34 };
+const isTouch = (typeof window !== "undefined") &&
+  (("ontouchstart" in window) || (navigator.maxTouchPoints > 0) || matchMedia("(pointer: coarse)").matches);
+
+function startLevel(n) {
+  levelNum = n;
+  level = genLevel(n);
+  resetPositions();
+  state = "banner";
+  timer = 80;
+}
+
+function resetPositions() {
+  player.x = level.playerStart.x;
+  player.y = level.playerStart.y;
+  hoover.x = level.hooverStart.x;
+  hoover.y = level.hooverStart.y;
+  hoover.angle = 0;
+  hooverGrace = 75;
+  trail = [];
+}
+
+// ---------- input ----------
+window.addEventListener("keydown", e => {
+  keys[e.key.toLowerCase()] = true;
+  if (["arrowup","arrowdown","arrowleft","arrowright"," "].includes(e.key.toLowerCase())) e.preventDefault();
+  if (state === "title" && (e.key === "Enter" || e.key === " ")) { attempts = 0; startLevel(1); }
+  if (state === "win" && (e.key === "Enter" || e.key === " " || e.key.toLowerCase() === "r")) { attempts = 0; state = "title"; }
+  if ((state === "playing" || state === "banner") && e.key.toLowerCase() === "r") { attempts++; resetPositions(); state = "banner"; timer = 50; }
+});
+window.addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+canvas.addEventListener("click", () => {
+  if (state === "title") { attempts = 0; startLevel(1); }
+  else if (state === "win") { state = "title"; }
+});
+
+// ---------- touch controls ----------
+function toCanvas(t) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (t.clientX - rect.left) / rect.width * W,
+    y: (t.clientY - rect.top) / rect.height * H
+  };
+}
+function pointInRect(p, r) {
+  return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+}
+function endJoystick() {
+  joystick.id = null;
+  touchMove.active = false; touchMove.dx = 0; touchMove.dy = 0;
+}
+
+canvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const p = toCanvas(t);
+    if (state === "title") { attempts = 0; startLevel(1); return; }
+    if (state === "win")   { attempts = 0; state = "title"; return; }
+    if ((state === "playing" || state === "banner") && pointInRect(p, RESTART_BTN)) {
+      attempts++; resetPositions(); state = "banner"; timer = 50; return;
+    }
+    if (joystick.id === null && (state === "playing" || state === "banner")) {
+      joystick.id = t.identifier;
+      joystick.ox = joystick.cx = p.x;
+      joystick.oy = joystick.cy = p.y;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener("touchmove", e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier !== joystick.id) continue;
+    const p = toCanvas(t);
+    let dx = p.x - joystick.ox, dy = p.y - joystick.oy;
+    const d = Math.hypot(dx, dy);
+    if (d > JOY_MAX) { dx = dx / d * JOY_MAX; dy = dy / d * JOY_MAX; }
+    joystick.cx = joystick.ox + dx;
+    joystick.cy = joystick.oy + dy;
+    if (d > JOY_DEAD) {
+      const m = Math.hypot(dx, dy) || 1;
+      touchMove.active = true; touchMove.dx = dx / m; touchMove.dy = dy / m;
+    } else {
+      touchMove.active = false; touchMove.dx = 0; touchMove.dy = 0;
+    }
+  }
+}, { passive: false });
+
+function touchEnded(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) if (t.identifier === joystick.id) endJoystick();
+}
+canvas.addEventListener("touchend", touchEnded, { passive: false });
+canvas.addEventListener("touchcancel", touchEnded, { passive: false });
+
+// ---------- update ----------
+function update() {
+  frame++;
+  if (state === "banner") {
+    if (--timer <= 0) state = "playing";
+    return;
+  }
+  if (state === "caught") {
+    if (--timer <= 0) { resetPositions(); state = "banner"; timer = 60; }
+    return;
+  }
+  if (state !== "playing") return;
+
+  // --- player movement ---
+  let dx = 0, dy = 0;
+  if (keys["arrowleft"]  || keys["a"]) dx -= 1;
+  if (keys["arrowright"] || keys["d"]) dx += 1;
+  if (keys["arrowup"]    || keys["w"]) dy -= 1;
+  if (keys["arrowdown"]  || keys["s"]) dy += 1;
+  if (touchMove.active) { dx += touchMove.dx; dy += touchMove.dy; }
+  if (dx || dy) {
+    const m = Math.hypot(dx, dy);
+    dx = dx / m * PLAYER_SPEED;
+    dy = dy / m * PLAYER_SPEED;
+    // move per-axis so the dust slides along obstacles
+    player.x += dx;
+    for (const r of level.walls.concat(level.furniture)) [player.x, player.y] = resolveCircleRect(player.x, player.y, PLAYER_R, r);
+    player.y += dy;
+    for (const r of level.walls.concat(level.furniture)) [player.x, player.y] = resolveCircleRect(player.x, player.y, PLAYER_R, r);
+
+    trail.push({x: player.x + (Math.random() - 0.5) * 6, y: player.y + (Math.random() - 0.5) * 6, life: 22});
+  }
+  for (const t of trail) t.life--;
+  trail = trail.filter(t => t.life > 0);
+
+  // --- reached the door? ---
+  const d = level.door;
+  const inDoorBand = (level.side < 2)
+    ? player.x > d.x + 4 && player.x < d.x + d.w - 4
+    : player.y > d.y + 4 && player.y < d.y + d.h - 4;
+  const throughDoor =
+    (level.side === 0 && player.y < WALL + PLAYER_R + 2) ||
+    (level.side === 1 && player.y > H - WALL - PLAYER_R - 2) ||
+    (level.side === 2 && player.x < WALL + PLAYER_R + 2) ||
+    (level.side === 3 && player.x > W - WALL - PLAYER_R - 2);
+  if (inDoorBand && throughDoor) {
+    if (levelNum >= NUM_LEVELS) { state = "win"; }
+    else startLevel(levelNum + 1);
+    return;
+  }
+
+  // --- hoover chase ---
+  if (hooverGrace > 0) {
+    hooverGrace--;
+  } else {
+    const hdx = player.x - hoover.x, hdy = player.y - hoover.y;
+    const hd = Math.hypot(hdx, hdy) || 1;
+    const sp = level.hooverSpeed;
+    hoover.angle = Math.atan2(hdy, hdx);
+    // per-axis movement -> slides around furniture instead of stopping dead
+    hoover.x += hdx / hd * sp;
+    for (const r of level.walls.concat(level.furniture)) [hoover.x, hoover.y] = resolveCircleRect(hoover.x, hoover.y, level.hooverR, r);
+    hoover.y += hdy / hd * sp;
+    for (const r of level.walls.concat(level.furniture)) [hoover.x, hoover.y] = resolveCircleRect(hoover.x, hoover.y, level.hooverR, r);
+
+    // caught?
+    if (Math.hypot(player.x - hoover.x, player.y - hoover.y) < level.hooverR * 0.85 + PLAYER_R) {
+      attempts++;
+      state = "caught";
+      timer = 70;
+    }
+  }
+}
+
+// ---------- drawing ----------
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function shade(hex, amt) {
+  const c = parseInt(hex.slice(1), 16);
+  let r = (c >> 16) + amt, g = ((c >> 8) & 255) + amt, b = (c & 255) + amt;
+  r = Math.max(0, Math.min(255, r)); g = Math.max(0, Math.min(255, g)); b = Math.max(0, Math.min(255, b));
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawFloor() {
+  ctx.fillStyle = level.floor;
+  ctx.fillRect(0, 0, W, H);
+  // floorboards
+  ctx.strokeStyle = "rgba(0,0,0,0.08)";
+  ctx.lineWidth = 1;
+  for (let y = 0; y < H; y += 34) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  for (let y = 0; y < H; y += 34) {
+    for (let x = (Math.floor(y / 34) % 2) * 60; x < W; x += 120) {
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + 34); ctx.stroke();
+    }
+  }
+}
+
+function drawWalls() {
+  ctx.fillStyle = "#4a3b30";
+  for (const wll of level.walls) ctx.fillRect(wll.x, wll.y, wll.w, wll.h);
+  // yellow exit door with a glow
+  const d = level.door;
+  const pulse = 0.55 + 0.45 * Math.sin(frame * 0.08);
+  ctx.save();
+  ctx.shadowColor = "#ffd23f";
+  ctx.shadowBlur = 18 + 10 * pulse;
+  ctx.fillStyle = "#ffd23f";
+  ctx.fillRect(d.x, d.y, d.w, d.h);
+  ctx.restore();
+  ctx.fillStyle = "#c9a020";
+  if (level.side < 2) {
+    ctx.fillRect(d.x + d.w / 2 - 2, d.y, 4, d.h);          // door split line
+    ctx.fillRect(d.x + d.w / 2 - 10, d.y + d.h / 2 - 2, 6, 4); // knob
+  } else {
+    ctx.fillRect(d.x, d.y + d.h / 2 - 2, d.w, 4);
+    ctx.fillRect(d.x + d.w / 2 - 2, d.y + d.h / 2 - 10, 4, 6);
+  }
+}
+
+function drawFurniture() {
+  for (const f of level.furniture) {
+    const base = shade("#8a5a36", Math.floor(f.tone * 40) - 20);
+    ctx.save();
+    // soft shadow
+    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    roundRect(f.x + 4, f.y + 6, f.w, f.h, 8); ctx.fill();
+
+    switch (f.type) {
+      case "sofa": {
+        ctx.fillStyle = "#7d6890";
+        roundRect(f.x, f.y, f.w, f.h, 12); ctx.fill();
+        ctx.fillStyle = "#695578";
+        roundRect(f.x + 6, f.y + 6, f.w - 12, f.h * 0.32, 8); ctx.fill(); // backrest
+        ctx.fillStyle = "#8d77a3";
+        roundRect(f.x + 8, f.y + f.h * 0.42, (f.w - 20) / 2, f.h * 0.46, 8); ctx.fill();
+        roundRect(f.x + 12 + (f.w - 20) / 2, f.y + f.h * 0.42, (f.w - 20) / 2, f.h * 0.46, 8); ctx.fill();
+        break;
+      }
+      case "table": {
+        ctx.fillStyle = base;
+        roundRect(f.x, f.y, f.w, f.h, 10); ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 3;
+        roundRect(f.x + 7, f.y + 7, f.w - 14, f.h - 14, 6); ctx.stroke();
+        break;
+      }
+      case "bed": {
+        ctx.fillStyle = "#b0c4de";
+        roundRect(f.x, f.y, f.w, f.h, 10); ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        roundRect(f.x + 6, f.y + 6, f.w - 12, Math.min(26, f.h * 0.3), 7); ctx.fill(); // pillow
+        ctx.fillStyle = "#8fa8c8";
+        roundRect(f.x + 4, f.y + f.h * 0.45, f.w - 8, f.h * 0.5, 8); ctx.fill();   // duvet
+        break;
+      }
+      case "cabinet": {
+        ctx.fillStyle = base;
+        roundRect(f.x, f.y, f.w, f.h, 6); ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(f.x + f.w / 2, f.y + 5); ctx.lineTo(f.x + f.w / 2, f.y + f.h - 5); ctx.stroke();
+        ctx.fillStyle = "#3a2a1a";
+        ctx.beginPath(); ctx.arc(f.x + f.w / 2 - 7, f.y + f.h / 2, 3, 0, 7); ctx.fill();
+        ctx.beginPath(); ctx.arc(f.x + f.w / 2 + 7, f.y + f.h / 2, 3, 0, 7); ctx.fill();
+        break;
+      }
+      case "plant": {
+        ctx.fillStyle = "#9c5a2e";
+        const pw = Math.min(f.w, f.h) * 0.45;
+        roundRect(f.x + f.w / 2 - pw / 2, f.y + f.h - pw, pw, pw * 0.8, 5); ctx.fill();
+        ctx.fillStyle = "#3f7d3a";
+        const cx = f.x + f.w / 2, cy = f.y + f.h * 0.42, rr = Math.min(f.w, f.h) * 0.42;
+        for (let i = 0; i < 6; i++) {
+          const a = i / 6 * Math.PI * 2;
+          ctx.beginPath();
+          ctx.arc(cx + Math.cos(a) * rr * 0.45, cy + Math.sin(a) * rr * 0.4, rr * 0.45, 0, 7);
+          ctx.fill();
+        }
+        ctx.fillStyle = "#4f944a";
+        ctx.beginPath(); ctx.arc(cx, cy, rr * 0.5, 0, 7); ctx.fill();
+        break;
+      }
+      default: { // chair
+        ctx.fillStyle = shade("#b06030", Math.floor(f.tone * 30) - 15);
+        roundRect(f.x, f.y, f.w, f.h, 10); ctx.fill();
+        ctx.fillStyle = "rgba(0,0,0,0.18)";
+        roundRect(f.x + 5, f.y + 5, f.w - 10, f.h * 0.28, 7); ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.14)";
+        roundRect(f.x + 8, f.y + f.h * 0.4, f.w - 16, f.h * 0.5, 7); ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+}
+
+function drawPlayer() {
+  // trail
+  for (const t of trail) {
+    ctx.fillStyle = `rgba(190,190,190,${t.life / 22 * 0.35})`;
+    ctx.beginPath(); ctx.arc(t.x, t.y, 3 + t.life * 0.1, 0, 7); ctx.fill();
+  }
+  const wob = Math.sin(frame * 0.2) * 1.2;
+  // fluffy dust blob: several offset circles
+  ctx.fillStyle = "#c8c8c8";
+  for (const [ox, oy, r] of [[-4, -2, 6], [4, -3, 6], [0, 3, 7], [-3, 4, 5], [4, 3, 5], [0, -4, 6]]) {
+    ctx.beginPath();
+    ctx.arc(player.x + ox + wob * 0.3, player.y + oy, r, 0, 7);
+    ctx.fill();
+  }
+  ctx.fillStyle = "#dedede";
+  ctx.beginPath(); ctx.arc(player.x, player.y + wob * 0.2, 7.5, 0, 7); ctx.fill();
+  // eyes
+  ctx.fillStyle = "#333";
+  ctx.beginPath(); ctx.arc(player.x - 3, player.y - 1.5, 1.6, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(player.x + 3, player.y - 1.5, 1.6, 0, 7); ctx.fill();
+}
+
+function drawHoover() {
+  const r = level.hooverR;
+  ctx.save();
+  ctx.translate(hoover.x, hoover.y);
+  ctx.rotate(hoover.angle);
+
+  // suction lines when hunting
+  if (state === "playing" && hooverGrace <= 0) {
+    ctx.strokeStyle = "rgba(255,255,255,0.35)";
+    ctx.lineWidth = 2;
+    for (let i = -1; i <= 1; i++) {
+      const off = (frame * 2.4) % 16;
+      ctx.beginPath();
+      ctx.moveTo(r + 22 - off, i * 8 - off * i * 0.2);
+      ctx.lineTo(r + 10 - off, i * 4);
+      ctx.stroke();
+    }
+  }
+
+  // nozzle
+  ctx.fillStyle = "#444";
+  ctx.fillRect(r - 8, -9, 20, 18);
+  ctx.fillStyle = "#222";
+  ctx.fillRect(r + 8, -12, 7, 24);
+
+  // body
+  const grad = ctx.createRadialGradient(-6, -8, 4, 0, 0, r);
+  grad.addColorStop(0, "#ff7d6e");
+  grad.addColorStop(0.6, "#d8402f");
+  grad.addColorStop(1, "#a32417");
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = "#7a1a10"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.stroke();
+
+  // dome + button
+  ctx.fillStyle = "#e9e3da";
+  ctx.beginPath(); ctx.arc(-4, 0, r * 0.45, 0, 7); ctx.fill();
+  ctx.fillStyle = hooverGrace > 0 ? "#888" : "#ffcf3f";
+  ctx.beginPath(); ctx.arc(-4, 0, 5, 0, 7); ctx.fill();
+
+  ctx.restore();
+
+  // "warming up" ring during grace period
+  if (state === "playing" && hooverGrace > 0) {
+    ctx.strokeStyle = `rgba(255,210,63,${0.4 + 0.3 * Math.sin(frame * 0.3)})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(hoover.x, hoover.y, r + 8, 0, 7); ctx.stroke();
+  }
+}
+
+function drawTouchUI() {
+  if (!isTouch) return;
+  // restart button
+  const b = RESTART_BTN;
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  roundRect(b.x, b.y, b.w, b.h, 8); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 1;
+  roundRect(b.x, b.y, b.w, b.h, 8); ctx.stroke();
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 15px 'Segoe UI', sans-serif";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("↻ Restart", b.x + b.w / 2, b.y + b.h / 2);
+  ctx.textAlign = "left";
+
+  // floating joystick
+  if (joystick.id !== null) {
+    ctx.strokeStyle = "rgba(255,255,255,0.3)"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(joystick.ox, joystick.oy, JOY_MAX, 0, 7); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.18)";
+    ctx.beginPath(); ctx.arc(joystick.ox, joystick.oy, JOY_MAX, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.beginPath(); ctx.arc(joystick.cx, joystick.cy, 22, 0, 7); ctx.fill();
+  }
+}
+
+function drawHUD() {
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  roundRect(10, H - 40, 330, 30, 8); ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 15px 'Segoe UI', sans-serif";
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText(`Level ${levelNum}/${NUM_LEVELS} — ${level.name}`, 22, H - 24);
+  ctx.textAlign = "right";
+  ctx.fillText(`Sucked up: ${attempts}`, 330, H - 24);
+  ctx.textAlign = "left";
+}
+
+function centeredPanel(lines, big) {
+  ctx.fillStyle = "rgba(15,15,22,0.78)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  let y = H / 2 - (lines.length - 1) * 24;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.font = (i === 0 ? `bold ${big || 46}px` : "20px") + " 'Segoe UI', sans-serif";
+    ctx.fillStyle = i === 0 ? "#ffd23f" : "#ddd";
+    ctx.fillText(lines[i], W / 2, y);
+    y += i === 0 ? 60 : 34;
+  }
+  ctx.textAlign = "left";
+}
+
+function draw() {
+  if (state === "title") {
+    ctx.fillStyle = "#1b1b22";
+    ctx.fillRect(0, 0, W, H);
+    // floating dust motes
+    for (let i = 0; i < 40; i++) {
+      const x = (i * 137 + frame * (0.2 + i % 5 * 0.1)) % W;
+      const y = (i * 89 + Math.sin((frame + i * 30) * 0.01) * 40 + H) % H;
+      ctx.fillStyle = `rgba(200,200,200,${0.1 + (i % 4) * 0.08})`;
+      ctx.beginPath(); ctx.arc(x, y, 2 + i % 3, 0, 7); ctx.fill();
+    }
+    centeredPanel([
+      "DUST!",
+      "You are a brave little dust bunny.",
+      "Sneak through all 10 rooms of the house to the yellow door —",
+      "but the hoover is hungry, and it gets faster every room.",
+      "",
+      isTouch ? "Tap to start" : "Press ENTER or click to start"
+    ], 64);
+    frame++;
+    return;
+  }
+
+  drawFloor();
+  drawWalls();
+  drawFurniture();
+  drawPlayer();
+  drawHoover();
+  drawHUD();
+  drawTouchUI();
+
+  if (state === "banner") {
+    const a = Math.min(1, timer / 25);
+    ctx.fillStyle = `rgba(15,15,22,${0.55 * a})`;
+    ctx.fillRect(0, H / 2 - 70, W, 140);
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.globalAlpha = Math.min(1, a + 0.3);
+    ctx.fillStyle = "#ffd23f";
+    ctx.font = "bold 40px 'Segoe UI', sans-serif";
+    ctx.fillText(`Level ${levelNum} — ${level.name}`, W / 2, H / 2 - 16);
+    ctx.fillStyle = "#eee";
+    ctx.font = "18px 'Segoe UI', sans-serif";
+    ctx.fillText("Get to the yellow door!", W / 2, H / 2 + 26);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = "left";
+  } else if (state === "caught") {
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(120,10,10,0.45)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 44px 'Segoe UI', sans-serif";
+    ctx.fillText("SUCKED UP!", W / 2, H / 2 - 12);
+    ctx.font = "20px 'Segoe UI', sans-serif";
+    ctx.fillText("Back to the start of the room...", W / 2, H / 2 + 30);
+    ctx.textAlign = "left";
+  } else if (state === "win") {
+    centeredPanel([
+      "YOU ESCAPED!",
+      "The little dust bunny made it through all 10 rooms",
+      `and out of the house. Sucked up ${attempts} time${attempts === 1 ? "" : "s"} along the way.`,
+      "",
+      isTouch ? "Tap to play again" : "Press ENTER to play again"
+    ], 54);
+  }
+}
+
+// ---------- main loop ----------
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
